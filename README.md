@@ -4,36 +4,41 @@ A Spring Boot microservices architecture resembling LinkedIn, featuring service-
 
 ## 🏗️ Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    API Gateway (8080)                   │
-│              (Spring Cloud Gateway + JWT Auth)          │
-└─────────────────────────────────────────────────────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-    ┌───▼────┐          ┌───▼────┐          ┌──▼──────┐
-    │  User   │          │ Posts  │          │Connections
-    │ Service │          │Service │          │ Service
-    │ (9020)  │          │(9010)  │          │ (9030)
-    └────┬────┘          └────┬───┘          └────┬─────┘
-         │                    │                    │
-         └────────────────────┼────────────────────┘
-                              │
-                    ┌─────────▼────────┐
-                    │ Kafka (9092)     │
-                    │ Event Bus        │
-                    └────────┬─────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │  Notification    │
-                    │  Service (9040)  │
-                    └──────────────────┘
-
-          ┌──────────────────────────────────┐
-          │ Eureka Discovery Server (8761)   │
-          │ Service Registration & Discovery │
-          └──────────────────────────────────┘
+```mermaid
+graph TB
+    Client["👤 Client"]
+    
+    Client -->|HTTP Requests| Gateway["🌐 API Gateway<br/>Port: 8080<br/>Spring Cloud Gateway"]
+    
+    Gateway -->|Route & Auth| UserSvc["👤 User Service<br/>Port: 9020<br/>Auth & Profile"]
+    Gateway -->|Route & Auth| PostsSvc["📝 Posts Service<br/>Port: 9010<br/>Posts & Likes"]
+    Gateway -->|Route & Auth| ConnSvc["🔗 Connections Service<br/>Port: 9030<br/>Connections"]
+    
+    UserSvc --> UserDB[(userDB<br/>PostgreSQL)]
+    PostsSvc --> PostsDB[(postsDB<br/>PostgreSQL)]
+    ConnSvc --> ConnDB[(connectionsDB<br/>PostgreSQL)]
+    
+    PostsSvc -->|Publish Events| Kafka["📨 Kafka Event Bus<br/>Port: 9092"]
+    ConnSvc -->|Publish Events| Kafka
+    
+    Kafka -->|Consume Events| NotifSvc["🔔 Notification Service<br/>Port: 9040"]
+    NotifSvc --> NotifDB[(notificationDB<br/>PostgreSQL)]
+    
+    Eureka["🔍 Eureka Discovery<br/>Port: 8761<br/>Service Registry"]
+    
+    UserSvc -.->|Register| Eureka
+    PostsSvc -.->|Register| Eureka
+    ConnSvc -.->|Register| Eureka
+    NotifSvc -.->|Register| Eureka
+    Gateway -.->|Discover Services| Eureka
+    
+    style Gateway fill:#ff6b6b
+    style UserSvc fill:#4ecdc4
+    style PostsSvc fill:#45b7d1
+    style ConnSvc fill:#96ceb4
+    style NotifSvc fill:#ffeaa7
+    style Kafka fill:#dfe6e9
+    style Eureka fill:#a29bfe
 ```
 
 ## 📋 Microservices
@@ -168,6 +173,154 @@ GET    /api/v1/connections              - Get user connections
 - **Sync**: REST calls via Feign Client
 - **Async**: Kafka event streaming for eventual consistency
 
+## 📊 Workflow Diagrams
+
+### 1️⃣ User Registration & Login Flow
+
+```mermaid
+sequenceDiagram
+    actor User as User (Client)
+    participant Gateway as API Gateway
+    participant UserSvc as User Service
+    participant UserDB as User DB
+    
+    User->>Gateway: POST /api/v1/users/signup<br/>(email, password, name)
+    Gateway->>UserSvc: Forward Request
+    UserSvc->>UserSvc: Hash Password (BCrypt)
+    UserSvc->>UserDB: Save New User
+    UserDB-->>UserSvc: User Created
+    UserSvc-->>Gateway: User Response + JWT Token
+    Gateway-->>User: 201 Created + Token
+    
+    Note over User,UserSvc: User Login Flow
+    User->>Gateway: POST /api/v1/users/login<br/>(email, password)
+    Gateway->>UserSvc: Forward Request
+    UserSvc->>UserDB: Fetch User by Email
+    UserDB-->>UserSvc: User Record
+    UserSvc->>UserSvc: Verify Password
+    UserSvc->>UserSvc: Generate JWT Token
+    UserSvc-->>Gateway: Login Response + Token
+    Gateway-->>User: 200 OK + Token
+```
+
+### 2️⃣ Create Post & Notification Flow
+
+```mermaid
+sequenceDiagram
+    actor User as User (Client)
+    participant Gateway as API Gateway
+    participant PostsSvc as Posts Service
+    participant PostsDB as Posts DB
+    participant Kafka as Kafka
+    participant NotifSvc as Notification Service
+    participant NotifDB as Notification DB
+    
+    User->>Gateway: POST /api/v1/posts<br/>with JWT Token
+    Gateway->>Gateway: Validate JWT Token
+    Gateway->>PostsSvc: Forward Request
+    PostsSvc->>PostsDB: Create Post Record
+    PostsDB-->>PostsSvc: Post Created
+    
+    PostsSvc->>Kafka: Publish PostCreatedEvent
+    Kafka-->>PostsSvc: Event Accepted
+    PostsSvc-->>Gateway: Post Response
+    Gateway-->>User: 201 Created
+    
+    Note over Kafka,NotifSvc: Async Event Processing
+    Kafka->>NotifSvc: Consume PostCreatedEvent
+    NotifSvc->>NotifDB: Store Notification<br/>(post_id, user_id)
+    NotifDB-->>NotifSvc: Notification Saved
+```
+
+### 3️⃣ Connection Request & Accept Flow
+
+```mermaid
+sequenceDiagram
+    actor User1 as User A (Requester)
+    actor User2 as User B (Recipient)
+    participant Gateway as API Gateway
+    participant ConnSvc as Connections Service
+    participant ConnDB as Connections DB
+    participant Kafka as Kafka
+    participant NotifSvc as Notification Service
+    
+    User1->>Gateway: POST /api/v1/connections/request<br/>(targetUserId)
+    Gateway->>ConnSvc: Forward Request
+    ConnSvc->>ConnDB: Create Connection Request
+    ConnDB-->>ConnSvc: Request Created
+    ConnSvc->>Kafka: Publish SendConnectionRequestEvent
+    Kafka-->>ConnSvc: Event Accepted
+    ConnSvc-->>Gateway: Request Response
+    Gateway-->>User1: 201 Request Sent
+    
+    Kafka->>NotifSvc: Consume SendConnectionRequestEvent
+    NotifSvc->>NotifSvc: Generate Notification
+    
+    Note over User2,ConnSvc: Accept Connection
+    User2->>Gateway: POST /api/v1/connections/accept/{requestId}
+    Gateway->>ConnSvc: Forward Request
+    ConnSvc->>ConnDB: Update Connection Status
+    ConnDB-->>ConnSvc: Connection Accepted
+    ConnSvc->>Kafka: Publish AcceptConnectionRequestEvent
+    Kafka-->>ConnSvc: Event Accepted
+    ConnSvc-->>Gateway: Accept Response
+    Gateway-->>User2: 200 Connection Accepted
+    
+    Kafka->>NotifSvc: Consume AcceptConnectionRequestEvent
+    NotifSvc->>NotifSvc: Notify User A
+```
+
+### 4️⃣ Like Post Flow
+
+```mermaid
+sequenceDiagram
+    actor User as User (Client)
+    participant Gateway as API Gateway
+    participant PostsSvc as Posts Service
+    participant PostsDB as Posts DB
+    participant Kafka as Kafka
+    participant NotifSvc as Notification Service
+    
+    User->>Gateway: POST /api/v1/posts/{postId}/like<br/>with JWT Token
+    Gateway->>Gateway: Validate JWT + Extract UserId
+    Gateway->>PostsSvc: Forward Request
+    
+    PostsSvc->>PostsDB: Check if Like Exists
+    alt Like Not Exists
+        PostsSvc->>PostsDB: Create PostLike Record
+        PostsDB-->>PostsSvc: Like Created
+        PostsSvc->>Kafka: Publish PostLikedEvent
+    else Like Exists
+        PostsSvc->>PostsDB: Delete PostLike Record
+        PostsDB-->>PostsSvc: Like Removed
+    end
+    
+    PostsSvc-->>Gateway: Like Response
+    Gateway-->>User: 200 OK
+    
+    Kafka->>NotifSvc: Consume PostLikedEvent
+    NotifSvc->>NotifSvc: Create Like Notification
+```
+
+### 5️⃣ Service-to-Service Communication Pattern
+
+```mermaid
+graph LR
+    A["📝 Posts Service"] -->|Feign Client<br/>REST Call| B["🔗 Connections Service"]
+    B -->|Response| A
+    
+    A -->|Event Publishing| C["📨 Kafka"]
+    C -->|Event Subscription| D["🔔 Notification Service"]
+    
+    D -->|Feign Client<br/>REST Call| B
+    B -->|User Info| D
+    
+    style A fill:#45b7d1
+    style B fill:#96ceb4
+    style C fill:#dfe6e9
+    style D fill:#ffeaa7
+```
+
 ## 🗄️ Database Architecture
 
 Each microservice has its own database (Database per service pattern):
@@ -209,6 +362,28 @@ mvn clean package
 ### Docker (Optional)
 ```bash
 docker-compose up
+```
+
+### Development Workflow
+
+```mermaid
+graph LR
+    A["📝 Code Changes"] --> B["🔨 Build<br/>mvn clean package"]
+    B --> C["🧪 Unit Tests"]
+    C -->|Pass| D["✅ Commit & Push"]
+    C -->|Fail| A
+    D --> E["🚀 Deploy to Dev"]
+    E --> F["🧫 Integration Tests"]
+    F -->|Pass| G["📦 Ready for Prod"]
+    F -->|Fail| A
+    
+    style A fill:#74b9ff
+    style B fill:#81ecec
+    style C fill:#55efc4
+    style D fill:#a29bfe
+    style E fill:#fd79a8
+    style F fill:#fdcb6e
+    style G fill:#6c5ce7
 ```
 
 ## 📊 Monitoring
